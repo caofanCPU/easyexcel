@@ -1,318 +1,161 @@
 package com.alibaba.excel.analysis.v03;
 
-import com.alibaba.excel.analysis.BaseSaxAnalyser;
-import com.alibaba.excel.context.AnalysisContext;
-import com.alibaba.excel.event.OneRowAnalysisFinishEvent;
-import com.alibaba.excel.exception.ExcelAnalysisException;
-import com.alibaba.excel.metadata.Sheet;
-import org.apache.poi.hssf.eventusermodel.*;
-import org.apache.poi.hssf.eventusermodel.dummyrecord.LastCellOfRowDummyRecord;
-import org.apache.poi.hssf.eventusermodel.dummyrecord.MissingCellDummyRecord;
-import org.apache.poi.hssf.model.HSSFFormulaParser;
-import org.apache.poi.hssf.record.*;
-import org.apache.poi.hssf.usermodel.HSSFWorkbook;
-import org.apache.poi.poifs.filesystem.POIFSFileSystem;
-
 import java.io.IOException;
-import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+
+import org.apache.poi.hssf.eventusermodel.EventWorkbookBuilder;
+import org.apache.poi.hssf.eventusermodel.FormatTrackingHSSFListener;
+import org.apache.poi.hssf.eventusermodel.HSSFEventFactory;
+import org.apache.poi.hssf.eventusermodel.HSSFListener;
+import org.apache.poi.hssf.eventusermodel.HSSFRequest;
+import org.apache.poi.hssf.eventusermodel.MissingRecordAwareHSSFListener;
+import org.apache.poi.hssf.eventusermodel.dummyrecord.LastCellOfRowDummyRecord;
+import org.apache.poi.hssf.record.BOFRecord;
+import org.apache.poi.hssf.record.BlankRecord;
+import org.apache.poi.hssf.record.BoolErrRecord;
+import org.apache.poi.hssf.record.BoundSheetRecord;
+import org.apache.poi.hssf.record.EOFRecord;
+import org.apache.poi.hssf.record.FormulaRecord;
+import org.apache.poi.hssf.record.HyperlinkRecord;
+import org.apache.poi.hssf.record.IndexRecord;
+import org.apache.poi.hssf.record.LabelRecord;
+import org.apache.poi.hssf.record.LabelSSTRecord;
+import org.apache.poi.hssf.record.MergeCellsRecord;
+import org.apache.poi.hssf.record.NoteRecord;
+import org.apache.poi.hssf.record.NumberRecord;
+import org.apache.poi.hssf.record.ObjRecord;
+import org.apache.poi.hssf.record.RKRecord;
+import org.apache.poi.hssf.record.Record;
+import org.apache.poi.hssf.record.SSTRecord;
+import org.apache.poi.hssf.record.StringRecord;
+import org.apache.poi.hssf.record.TextObjectRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.alibaba.excel.analysis.ExcelReadExecutor;
+import com.alibaba.excel.analysis.v03.handlers.BlankRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.BofRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.BoolErrRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.BoundSheetRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.DummyRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.EofRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.FormulaRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.HyperlinkRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.IndexRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.LabelRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.LabelSstRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.MergeCellsRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.NoteRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.NumberRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.ObjRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.RkRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.SstRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.StringRecordHandler;
+import com.alibaba.excel.analysis.v03.handlers.TextObjectRecordHandler;
+import com.alibaba.excel.context.xls.XlsReadContext;
+import com.alibaba.excel.exception.ExcelAnalysisException;
+import com.alibaba.excel.exception.ExcelAnalysisStopException;
+import com.alibaba.excel.read.metadata.ReadSheet;
+import com.alibaba.excel.read.metadata.holder.xls.XlsReadWorkbookHolder;
 
 /**
- * /** * A text extractor for Excel files. * <p> * Returns the textual content of the file, suitable for *  indexing by
- * something like Lucene, but not really *  intended for display to the user. * </p> * <p> * To turn an excel file into
- * a CSV or similar, then see *  the XLS2CSVmra example * </p> * * @see
- * <a href="http://svn.apache.org/repos/asf/poi/trunk/src/examples/src/org/apache/poi/hssf/eventusermodel/examples/XLS2CSVmra.java">XLS2CSVmra</a>
+ * /** * A text extractor for Excel files. *
+ * <p>
+ * * Returns the textual content of the file, suitable for * indexing by something like Lucene, but not really *
+ * intended for display to the user. *
+ * </p>
+ * *
+ * <p>
+ * * To turn an excel file into a CSV or similar, then see * the XLS2CSVmra example *
+ * </p>
+ * * * @see <a href=
+ * "http://svn.apache.org/repos/asf/poi/trunk/src/examples/src/org/apache/poi/hssf/eventusermodel/examples/XLS2CSVmra.java">XLS2CSVmra</a>
  *
  * @author jipengfei
  */
-public class XlsSaxAnalyser extends BaseSaxAnalyser implements HSSFListener {
+public class XlsSaxAnalyser implements HSSFListener, ExcelReadExecutor {
+    private static final Logger LOGGER = LoggerFactory.getLogger(XlsSaxAnalyser.class);
+    private static final short DUMMY_RECORD_SID = -1;
+    private XlsReadContext xlsReadContext;
+    private static final Map<Short, XlsRecordHandler> XLS_RECORD_HANDLER_MAP = new HashMap<Short, XlsRecordHandler>(32);
 
-    private boolean analyAllSheet = false;
+    static {
+        XLS_RECORD_HANDLER_MAP.put(BlankRecord.sid, new BlankRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(BOFRecord.sid, new BofRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(BoolErrRecord.sid, new BoolErrRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(BoundSheetRecord.sid, new BoundSheetRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(DUMMY_RECORD_SID, new DummyRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(EOFRecord.sid, new EofRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(FormulaRecord.sid, new FormulaRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(HyperlinkRecord.sid, new HyperlinkRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(IndexRecord.sid, new IndexRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(LabelRecord.sid, new LabelRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(LabelSSTRecord.sid, new LabelSstRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(MergeCellsRecord.sid, new MergeCellsRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(NoteRecord.sid, new NoteRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(NumberRecord.sid, new NumberRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(ObjRecord.sid, new ObjRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(RKRecord.sid, new RkRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(SSTRecord.sid, new SstRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(StringRecord.sid, new StringRecordHandler());
+        XLS_RECORD_HANDLER_MAP.put(TextObjectRecord.sid, new TextObjectRecordHandler());
+    }
 
-    public XlsSaxAnalyser(AnalysisContext context) throws IOException {
-        this.analysisContext = context;
-        this.records = new ArrayList<String>();
-        if (analysisContext.getCurrentSheet() == null) {
-            this.analyAllSheet = true;
-        }
-        context.setCurrentRowNum(0);
-        this.fs = new POIFSFileSystem(analysisContext.getInputStream());
-
+    public XlsSaxAnalyser(XlsReadContext xlsReadContext) {
+        this.xlsReadContext = xlsReadContext;
     }
 
     @Override
-    public List<Sheet> getSheets() {
-        execute();
-        return sheets;
+    public List<ReadSheet> sheetList() {
+        try {
+            if (xlsReadContext.readWorkbookHolder().getActualSheetDataList() == null) {
+                new XlsListSheetListener(xlsReadContext).execute();
+            }
+        } catch (ExcelAnalysisStopException e) {
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("Custom stop!");
+            }
+        }
+        return xlsReadContext.readWorkbookHolder().getActualSheetDataList();
     }
 
     @Override
     public void execute() {
-        init();
+        XlsReadWorkbookHolder xlsReadWorkbookHolder = xlsReadContext.xlsReadWorkbookHolder();
         MissingRecordAwareHSSFListener listener = new MissingRecordAwareHSSFListener(this);
-        formatListener = new FormatTrackingHSSFListener(listener);
-
+        xlsReadWorkbookHolder.setFormatTrackingHSSFListener(new FormatTrackingHSSFListener(listener));
+        EventWorkbookBuilder.SheetRecordCollectingListener workbookBuildingListener =
+            new EventWorkbookBuilder.SheetRecordCollectingListener(
+                xlsReadWorkbookHolder.getFormatTrackingHSSFListener());
+        xlsReadWorkbookHolder.setHssfWorkbook(workbookBuildingListener.getStubHSSFWorkbook());
         HSSFEventFactory factory = new HSSFEventFactory();
         HSSFRequest request = new HSSFRequest();
-
-        if (outputFormulaValues) {
-            request.addListenerForAllRecords(formatListener);
-        } else {
-            workbookBuildingListener = new EventWorkbookBuilder.SheetRecordCollectingListener(formatListener);
-            request.addListenerForAllRecords(workbookBuildingListener);
-        }
-
+        request.addListenerForAllRecords(xlsReadWorkbookHolder.getFormatTrackingHSSFListener());
         try {
-            factory.processWorkbookEvents(request, fs);
+            factory.processWorkbookEvents(request, xlsReadWorkbookHolder.getPoifsFileSystem());
         } catch (IOException e) {
             throw new ExcelAnalysisException(e);
         }
     }
 
-    private void init() {
-        lastRowNumber = 0;
-        lastColumnNumber = 0;
-        nextRow = 0;
-
-        nextColumn = 0;
-
-        sheetIndex = 0;
-
-        records = new ArrayList<String>();
-
-        notAllEmpty = false;
-
-        orderedBSRs = null;
-
-        boundSheetRecords = new ArrayList<BoundSheetRecord>();
-
-        sheets = new ArrayList<Sheet>();
-        if (analysisContext.getCurrentSheet() == null) {
-            this.analyAllSheet = true;
-        } else {
-            this.analyAllSheet = false;
-        }
-    }
-
-    private POIFSFileSystem fs;
-
-    private int lastRowNumber;
-    private int lastColumnNumber;
-
-    /**
-     * Should we output the formula, or the value it has?
-     */
-    private boolean outputFormulaValues = true;
-
-    /**
-     * For parsing Formulas
-     */
-    private EventWorkbookBuilder.SheetRecordCollectingListener workbookBuildingListener;
-    private HSSFWorkbook stubWorkbook;
-    private SSTRecord sstRecord;
-    private FormatTrackingHSSFListener formatListener;
-
-    /**
-     * So we known which sheet we're on
-     */
-
-    private int nextRow;
-    private int nextColumn;
-    private boolean outputNextStringRecord;
-
-    /**
-     * Main HSSFListener method, processes events, and outputs the CSV as the file is processed.
-     */
-
-    private int sheetIndex;
-
-    private List<String> records;
-
-    private boolean notAllEmpty = false;
-
-    private BoundSheetRecord[] orderedBSRs;
-
-    private List<BoundSheetRecord> boundSheetRecords = new ArrayList<BoundSheetRecord>();
-
-    private List<Sheet> sheets = new ArrayList<Sheet>();
-
+    @Override
     public void processRecord(Record record) {
-        int thisRow = -1;
-        int thisColumn = -1;
-        String thisStr = null;
-
-        switch (record.getSid()) {
-            case BoundSheetRecord.sid:
-                boundSheetRecords.add((BoundSheetRecord)record);
-                break;
-            case BOFRecord.sid:
-                BOFRecord br = (BOFRecord)record;
-                if (br.getType() == BOFRecord.TYPE_WORKSHEET) {
-                    // Create sub workbook if required
-                    if (workbookBuildingListener != null && stubWorkbook == null) {
-                        stubWorkbook = workbookBuildingListener.getStubHSSFWorkbook();
-                    }
-
-                    if (orderedBSRs == null) {
-                        orderedBSRs = BoundSheetRecord.orderByBofPosition(boundSheetRecords);
-                    }
-                    sheetIndex++;
-
-                    Sheet sheet = new Sheet(sheetIndex, 0);
-                    sheet.setSheetName(orderedBSRs[sheetIndex - 1].getSheetname());
-                    sheets.add(sheet);
-                    if (this.analyAllSheet) {
-                        analysisContext.setCurrentSheet(sheet);
-                    }
-                }
-                break;
-
-            case SSTRecord.sid:
-                sstRecord = (SSTRecord)record;
-                break;
-
-            case BlankRecord.sid:
-                BlankRecord brec = (BlankRecord)record;
-
-                thisRow = brec.getRow();
-                thisColumn = brec.getColumn();
-                thisStr = "";
-                break;
-            case BoolErrRecord.sid:
-                BoolErrRecord berec = (BoolErrRecord)record;
-
-                thisRow = berec.getRow();
-                thisColumn = berec.getColumn();
-                thisStr = "";
-                break;
-
-            case FormulaRecord.sid:
-                FormulaRecord frec = (FormulaRecord)record;
-
-                thisRow = frec.getRow();
-                thisColumn = frec.getColumn();
-
-                if (outputFormulaValues) {
-                    if (Double.isNaN(frec.getValue())) {
-                        // Formula result is a string
-                        // This is stored in the next record
-                        outputNextStringRecord = true;
-                        nextRow = frec.getRow();
-                        nextColumn = frec.getColumn();
-                    } else {
-                        thisStr = formatListener.formatNumberDateCell(frec);
-                    }
-                } else {
-                    thisStr = HSSFFormulaParser.toFormulaString(stubWorkbook, frec.getParsedExpression());
-                }
-                break;
-            case StringRecord.sid:
-                if (outputNextStringRecord) {
-                    // String for formula
-                    StringRecord srec = (StringRecord)record;
-                    thisStr = srec.getString();
-                    thisRow = nextRow;
-                    thisColumn = nextColumn;
-                    outputNextStringRecord = false;
-                }
-                break;
-
-            case LabelRecord.sid:
-                LabelRecord lrec = (LabelRecord)record;
-
-                thisRow = lrec.getRow();
-                thisColumn = lrec.getColumn();
-                thisStr = lrec.getValue();
-                break;
-            case LabelSSTRecord.sid:
-                LabelSSTRecord lsrec = (LabelSSTRecord)record;
-
-                thisRow = lsrec.getRow();
-                thisColumn = lsrec.getColumn();
-                if (sstRecord == null) {
-                    thisStr = "";
-                } else {
-                    thisStr = sstRecord.getString(lsrec.getSSTIndex()).toString();
-                }
-                break;
-            case NoteRecord.sid:
-                NoteRecord nrec = (NoteRecord)record;
-
-                thisRow = nrec.getRow();
-                thisColumn = nrec.getColumn();
-                // TODO: Find object to match nrec.getShapeId()
-                thisStr = "(TODO)";
-                break;
-            case NumberRecord.sid:
-                NumberRecord numrec = (NumberRecord)record;
-
-                thisRow = numrec.getRow();
-                thisColumn = numrec.getColumn();
-
-                // Format
-                thisStr = formatListener.formatNumberDateCell(numrec);
-                break;
-            case RKRecord.sid:
-                RKRecord rkrec = (RKRecord)record;
-
-                thisRow = rkrec.getRow();
-                thisColumn = rkrec.getColumn();
-                thisStr = "";
-                break;
-            default:
-                break;
+        XlsRecordHandler handler = XLS_RECORD_HANDLER_MAP.get(record.getSid());
+        if (handler == null) {
+            return;
         }
-
-        // Handle new row
-        if (thisRow != -1 && thisRow != lastRowNumber) {
-            lastColumnNumber = -1;
+        boolean ignoreRecord = (handler instanceof IgnorableXlsRecordHandler)
+            && xlsReadContext.xlsReadSheetHolder() != null && xlsReadContext.xlsReadSheetHolder().getIgnoreRecord();
+        if (ignoreRecord) {
+            // No need to read the current sheet
+            return;
         }
-
-        // Handle missing column
-        if (record instanceof MissingCellDummyRecord) {
-            MissingCellDummyRecord mc = (MissingCellDummyRecord)record;
-            thisRow = mc.getRow();
-            thisColumn = mc.getColumn();
-            thisStr = "";
+        if (!handler.support(xlsReadContext, record)) {
+            return;
         }
-
-        // If we got something to print out, do so
-        if (thisStr != null) {
-
-            if (analysisContext.trim()) {
-                thisStr = thisStr.trim();
-            }
-            if (!"".equals(thisStr)) {
-                notAllEmpty = true;
-            }
-            //            }
-            records.add(thisStr);
-        }
-
-        // Update column and row count
-        if (thisRow > -1) {
-            lastRowNumber = thisRow;
-        }
-        if (thisColumn > -1) {
-            lastColumnNumber = thisColumn;
-        }
-
-        // Handle end of row
-        if (record instanceof LastCellOfRowDummyRecord) {
-            thisRow = ((LastCellOfRowDummyRecord)record).getRow();
-
-            if (lastColumnNumber == -1) {
-                lastColumnNumber = 0;
-            }
-            analysisContext.setCurrentRowNum(thisRow);
-            Sheet sheet = analysisContext.getCurrentSheet();
-
-            if ((sheet == null || sheet.getSheetNo() == sheetIndex) && notAllEmpty) {
-                notifyListeners(new OneRowAnalysisFinishEvent(records));
-            }
-            records.clear();
-            lastColumnNumber = -1;
-            notAllEmpty = false;
-        }
+        handler.processRecord(xlsReadContext, record);
     }
+
 }
